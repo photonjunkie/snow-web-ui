@@ -2,8 +2,9 @@ import base64
 import os
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 import requests
+from ollama import ListResponse, list
 
 from langchain_anthropic import ChatAnthropic
 from langchain_mistralai import ChatMistralAI
@@ -24,10 +25,49 @@ PROVIDER_DISPLAY_NAMES = {
     "moonshot": "MoonShot"
 }
 
+def get_ollama_models() -> List[str]:
+    """
+    Fetch available models from Ollama server
+    Returns a list of model names or empty list if Ollama is not available
+    """
+    try:
+        base_endpoint = os.getenv("OLLAMA_ENDPOINT", "http://localhost:11434")
+        models_endpoint = f"{base_endpoint}/api/tags"
+        print(f"Trying direct HTTP request to: {models_endpoint}")
+
+        response = requests.get(models_endpoint)
+        if response.status_code == 200:
+            models_data = response.json()
+            return [model['name'] for model in models_data.get('models', [])]
+        else:
+            print(f"HTTP request failed with status code: {response.status_code}")
+            return []
+
+    except Exception as e:
+        print(f"Warning: Could not fetch Ollama models: {e}")
+        return []
+
+def update_model_names():
+    """
+    Update the model_names dictionary with current Ollama models
+    """
+    global model_names
+    ollama_models = get_ollama_models()
+
+    # Create a copy of the original dictionary
+    updated_models = model_names.copy()
+
+    # Update Ollama models if we successfully fetched them
+    if ollama_models:
+        updated_models["ollama"] = ollama_models
+
+    return updated_models
+
+
 def get_llm_model(provider: str, **kwargs):
     """
-    获取LLM 模型
-    :param provider: 模型类型
+    Get LLM model
+    :param provider: model type
     :param kwargs:
     :return:
     """
@@ -150,7 +190,6 @@ def get_llm_model(provider: str, **kwargs):
             base_url=base_url,
             api_key=api_key,
         )
-
     elif provider == "moonshot":
         return ChatOpenAI(
             model=kwargs.get("model_name", "moonshot-v1-32k-vision-preview"),
@@ -161,20 +200,26 @@ def get_llm_model(provider: str, **kwargs):
     else:
         raise ValueError(f"Unsupported provider: {provider}")
 
+
 # Predefined model names for common providers
 model_names = {
     "anthropic": ["claude-3-5-sonnet-20241022", "claude-3-5-sonnet-20240620", "claude-3-opus-20240229"],
     "openai": ["gpt-4o", "gpt-4", "gpt-3.5-turbo", "o3-mini"],
     "deepseek": ["deepseek-chat", "deepseek-reasoner"],
-    "google": ["gemini-2.0-flash", "gemini-2.0-flash-thinking-exp", "gemini-1.5-flash-latest", "gemini-1.5-flash-8b-latest", "gemini-2.0-flash-thinking-exp-01-21", "gemini-2.0-pro-exp-02-05"],
-    "ollama": ["qwen2.5:7b", "qwen2.5:14b", "qwen2.5:32b", "qwen2.5-coder:14b", "qwen2.5-coder:32b", "llama2:7b", "deepseek-r1:14b", "deepseek-r1:32b"],
+    "google": ["gemini-2.0-flash", "gemini-2.0-flash-thinking-exp", "gemini-1.5-flash-latest",
+               "gemini-1.5-flash-8b-latest", "gemini-2.0-flash-thinking-exp-01-21", "gemini-2.0-pro-exp-02-05"],
     "azure_openai": ["gpt-4o", "gpt-4", "gpt-3.5-turbo"],
     "mistral": ["pixtral-large-latest", "mistral-large-latest", "mistral-small-latest", "ministral-8b-latest"],
     "alibaba": ["qwen-plus", "qwen-max", "qwen-turbo", "qwen-long"],
     "moonshot": ["moonshot-v1-32k-vision-preview", "moonshot-v1-8k-vision-preview"],
+    # Ollama models will be populated dynamically
+    "ollama": []
 }
 
-# Callback to update the model name dropdown based on the selected provider
+# Update model_names with current Ollama models
+model_names = update_model_names()
+
+
 def update_model_dropdown(llm_provider, api_key=None, base_url=None):
     """
     Update the model name dropdown with predefined models for the selected provider.
@@ -185,11 +230,38 @@ def update_model_dropdown(llm_provider, api_key=None, base_url=None):
     if not base_url:
         base_url = os.getenv(f"{llm_provider.upper()}_BASE_URL", "")
 
-    # Use predefined models for the selected provider
+    if llm_provider == "ollama":
+        # Refresh Ollama models list when provider is selected
+        current_models = get_ollama_models()
+        if current_models:
+            return gr.Dropdown(
+                choices=current_models,
+                value=current_models[0] if current_models else "",
+                interactive=True
+            )
+        else:
+            return gr.Dropdown(
+                choices=[],
+                value="",
+                interactive=True,
+                allow_custom_value=True
+            )
+
+    # Use predefined models for other providers
     if llm_provider in model_names:
-        return gr.Dropdown(choices=model_names[llm_provider], value=model_names[llm_provider][0], interactive=True)
+        return gr.Dropdown(
+            choices=model_names[llm_provider],
+            value=model_names[llm_provider][0],
+            interactive=True
+        )
     else:
-        return gr.Dropdown(choices=[], value="", interactive=True, allow_custom_value=True)
+        return gr.Dropdown(
+            choices=[],
+            value="",
+            interactive=True,
+            allow_custom_value=True
+        )
+
 
 def handle_api_key_error(provider: str, env_var: str):
     """
@@ -200,6 +272,7 @@ def handle_api_key_error(provider: str, env_var: str):
         f"💥 {provider_display} API key not found! 🔑 Please set the "
         f"`{env_var}` environment variable or provide it in the UI."
     )
+
 
 def encode_image(img_path):
     if not img_path:
@@ -212,7 +285,7 @@ def encode_image(img_path):
 def get_latest_files(directory: str, file_types: list = ['.webm', '.zip']) -> Dict[str, Optional[str]]:
     """Get the latest recording and trace files"""
     latest_files: Dict[str, Optional[str]] = {ext: None for ext in file_types}
-    
+
     if not os.path.exists(directory):
         os.makedirs(directory, exist_ok=True)
         return latest_files
@@ -227,8 +300,10 @@ def get_latest_files(directory: str, file_types: list = ['.webm', '.zip']) -> Di
                     latest_files[file_type] = str(latest)
         except Exception as e:
             print(f"Error getting latest {file_type} file: {e}")
-            
+
     return latest_files
+
+
 async def capture_screenshot(browser_context):
     """Capture and encode a screenshot"""
     # Extract the Playwright browser instance
